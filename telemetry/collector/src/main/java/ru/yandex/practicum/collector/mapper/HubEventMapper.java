@@ -49,12 +49,21 @@ public class HubEventMapper {
 
     private List<ScenarioConditionAvro> mapConditions(List<ScenarioCondition> conditions) {
         return conditions.stream()
-                .map(condition -> ScenarioConditionAvro.newBuilder()
-                        .setSensorId(condition.getSensorId())
-                        .setType(ConditionTypeAvro.valueOf(condition.getType().name()))
-                        .setOperation(ConditionOperationAvro.valueOf(condition.getOperation().name()))
-                        .setValue(condition.getValue())
-                        .build())
+                .map(condition -> {
+                    ScenarioConditionAvro.Builder builder = ScenarioConditionAvro.newBuilder()
+                            .setSensorId(condition.getSensorId())
+                            .setType(ConditionTypeAvro.valueOf(condition.getType().name()))
+                            .setOperation(ConditionOperationAvro.valueOf(condition.getOperation().name()));
+
+                    Object value = condition.getValue();
+                    if (value instanceof Integer) {
+                        builder.setValue((Integer) value);
+                    } else if (value instanceof Boolean) {
+                        builder.setValue((Boolean) value);
+                    }
+
+                    return builder.build();
+                })
                 .collect(Collectors.toList());
     }
 
