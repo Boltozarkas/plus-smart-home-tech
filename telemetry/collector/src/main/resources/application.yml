@@ -2,6 +2,10 @@ spring:
   application:
     name: collector
 
+grpc:
+  server:
+    port: 59091
+
 kafka:
   bootstrap-servers: localhost:9092
 
@@ -9,9 +13,6 @@ collector:
   topic:
     sensors: telemetry.sensors.v1
     hubs: telemetry.hubs.v1
-
-server:
-  port: 8080
 
 logging:
   level:
