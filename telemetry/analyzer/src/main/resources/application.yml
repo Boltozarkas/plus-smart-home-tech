@@ -8,7 +8,7 @@ spring:
     driver-class-name: org.postgresql.Driver
   jpa:
     hibernate:
-      ddl-auto: create
+      ddl-auto: update
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
@@ -24,6 +24,7 @@ grpc:
 kafka:
   bootstrap-servers: localhost:9092
   consumer:
+    enable-auto-commit: false
     snapshots:
       group-id: analyzer-snapshots-group
       client-id: analyzer-snapshots-consumer

@@ -8,6 +8,7 @@ import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.errors.WakeupException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -16,8 +17,9 @@ import ru.yandex.practicum.kafka.telemetry.event.SensorEventAvro;
 import ru.yandex.practicum.kafka.telemetry.event.SensorsSnapshotAvro;
 
 import java.time.Duration;
-import java.util.Collections;
+import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.Future;
 
 @Slf4j
 @Component
@@ -34,33 +36,55 @@ public class AggregationStarter {
     @Value("${kafka.producer.topic}")
     private String producerTopic;
 
-    private volatile boolean running = true;
-
     public void start() {
         try {
-            consumer.subscribe(Collections.singletonList(consumerTopic));
+            consumer.subscribe(List.of(consumerTopic));
             log.info("Subscribed to topic: {}", consumerTopic);
 
             while (true) {
                 ConsumerRecords<String, SpecificRecordBase> records = consumer.poll(Duration.ofMillis(1000));
 
+                // Пропускаем итерацию, если нет записей
+                if (records.isEmpty()) {
+                    continue;
+                }
+
+                boolean allProcessed = true;
+
                 for (ConsumerRecord<String, SpecificRecordBase> record : records) {
-                    SensorEventAvro event = (SensorEventAvro) record.value();
-                    Optional<SensorsSnapshotAvro> snapshot = aggregationService.updateState(event);
+                    try {
+                        SensorEventAvro event = (SensorEventAvro) record.value();
+                        Optional<SensorsSnapshotAvro> snapshot = aggregationService.updateState(event);
 
-                    if (snapshot.isPresent()) {
-                        SensorsSnapshotAvro snap = snapshot.get();
-                        ProducerRecord<String, SpecificRecordBase> producerRecord =
-                                new ProducerRecord<>(producerTopic, null,
-                                        snap.getTimestamp().toEpochMilli(), snap.getHubId(), snap);
+                        if (snapshot.isPresent()) {
+                            SensorsSnapshotAvro snap = snapshot.get();
+                            ProducerRecord<String, SpecificRecordBase> producerRecord =
+                                    new ProducerRecord<>(producerTopic, null,
+                                            snap.getTimestamp().toEpochMilli(), snap.getHubId(), snap);
 
-                        producer.send(producerRecord);
-                        log.info("Snapshot sent to topic {}: hubId {}", producerTopic, snap.getHubId());
+                            // Синхронная отправка — ждём результат
+                            Future<RecordMetadata> future = producer.send(producerRecord);
+                            RecordMetadata metadata = future.get();
+
+                            log.info("Snapshot sent to topic {}: hubId {}, partition {}, offset {}",
+                                    producerTopic, snap.getHubId(), metadata.partition(), metadata.offset());
+                        }
+                    } catch (Exception e) {
+                        log.error("Failed to process record from partition {}, offset {}",
+                                record.partition(), record.offset(), e);
+                        allProcessed = false;
+                        break; // Прерываем обработку batch'а
                     }
                 }
 
-                // Фиксируем смещение
-                consumer.commitSync();
+                // Коммитим offset только если весь batch успешно обработан
+                if (allProcessed) {
+                    consumer.commitSync();
+                    log.info("Offsets committed successfully");
+                } else {
+                    // Не коммитим offset, чтобы записи можно было обработать повторно
+                    log.warn("Skipping offset commit due to processing errors");
+                }
             }
 
         } catch (WakeupException e) {
@@ -68,9 +92,11 @@ public class AggregationStarter {
         } catch (Exception e) {
             log.error("Error during aggregation", e);
         } finally {
+            // Только освобождение ресурсов
             try {
                 producer.flush();
-                consumer.commitSync();
+            } catch (Exception e) {
+                log.error("Error during producer flush", e);
             } finally {
                 log.info("Closing consumer");
                 consumer.close();
@@ -78,5 +104,13 @@ public class AggregationStarter {
                 producer.close();
             }
         }
+    }
+
+    /**
+     * Метод для штатной остановки consumer'а.
+     * Вызывается из другого потока (например, при завершении приложения).
+     */
+    public void shutdown() {
+        consumer.wakeup();
     }
 }

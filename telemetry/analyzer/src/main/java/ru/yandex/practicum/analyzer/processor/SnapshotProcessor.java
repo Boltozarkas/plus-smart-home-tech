@@ -8,6 +8,7 @@ import org.apache.avro.specific.SpecificRecordBase;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.errors.WakeupException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import ru.yandex.practicum.analyzer.model.*;
@@ -44,12 +45,33 @@ public class SnapshotProcessor {
 
             while (true) {
                 ConsumerRecords<String, SpecificRecordBase> records = snapshotConsumer.poll(Duration.ofMillis(1000));
-                for (ConsumerRecord<String, SpecificRecordBase> record : records) {
-                    SensorsSnapshotAvro snapshot = (SensorsSnapshotAvro) record.value();
-                    processSnapshot(snapshot);
+
+                if (records.isEmpty()) {
+                    continue;
                 }
-                snapshotConsumer.commitSync();
+
+                boolean allProcessed = true;
+
+                for (ConsumerRecord<String, SpecificRecordBase> record : records) {
+                    try {
+                        SensorsSnapshotAvro snapshot = (SensorsSnapshotAvro) record.value();
+                        processSnapshot(snapshot);
+                    } catch (Exception e) {
+                        log.error("Failed to process snapshot from partition {}, offset {}",
+                                record.partition(), record.offset(), e);
+                        allProcessed = false;
+                        break;
+                    }
+                }
+
+                if (allProcessed) {
+                    snapshotConsumer.commitSync();
+                } else {
+                    log.warn("Skipping offset commit due to processing errors");
+                }
             }
+        } catch (WakeupException e) {
+            log.info("Wakeup exception received in SnapshotProcessor, shutting down...");
         } catch (Exception e) {
             log.error("Error in SnapshotProcessor", e);
         } finally {
@@ -57,8 +79,29 @@ public class SnapshotProcessor {
         }
     }
 
+    public void shutdown() {
+        snapshotConsumer.wakeup();
+    }
+
     private void processSnapshot(SensorsSnapshotAvro snapshot) {
+        log.info("Processing snapshot for hub: {}", snapshot.getHubId());
+
+        // Ждем 500мс перед обработкой, чтобы HubEventProcessor успел сохранить все сценарии
+        try {
+            Thread.sleep(500);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return;
+        }
+
         List<Scenario> scenarios = scenarioRepository.findByHubId(snapshot.getHubId());
+        log.info("Found {} scenarios for hub: {}", scenarios.size(), snapshot.getHubId());
+
+        if (scenarios.isEmpty()) {
+            log.warn("No scenarios found for hub: {}", snapshot.getHubId());
+            return;
+        }
+
         for (Scenario scenario : scenarios) {
             boolean allConditionsMet = checkConditions(scenario, snapshot);
             if (allConditionsMet) {
@@ -74,10 +117,12 @@ public class SnapshotProcessor {
             SensorStateAvro state = snapshot.getSensorsState().get(sensor.getId());
 
             if (state == null) {
+                log.debug("No state for sensor {} in snapshot", sensor.getId());
                 return false;
             }
 
             if (!evaluateCondition(condition, state)) {
+                log.debug("Condition not met for sensor {}", sensor.getId());
                 return false;
             }
         }
@@ -89,6 +134,9 @@ public class SnapshotProcessor {
         int sensorValue = extractValue(data, condition.getType());
         int conditionValue = condition.getValue() != null ? condition.getValue() : 0;
 
+        log.debug("Evaluating condition: type={}, operation={}, sensorValue={}, conditionValue={}",
+                condition.getType(), condition.getOperation(), sensorValue, conditionValue);
+
         return switch (condition.getOperation()) {
             case "EQUALS" -> sensorValue == conditionValue;
             case "GREATER_THAN" -> sensorValue > conditionValue;
@@ -98,7 +146,6 @@ public class SnapshotProcessor {
     }
 
     private int extractValue(Object data, String type) {
-        // Упрощённо — в реальном коде нужно проверять тип данных
         if (data instanceof ru.yandex.practicum.kafka.telemetry.event.ClimateSensorAvro climate) {
             return switch (type) {
                 case "TEMPERATURE" -> climate.getTemperatureC();
@@ -153,6 +200,7 @@ public class SnapshotProcessor {
                     .build();
 
             hubRouterClient.handleDeviceAction(request);
+
             log.info("Action executed: scenario={}, sensor={}, action={}",
                     scenario.getName(), sensor.getId(), action.getType());
         }

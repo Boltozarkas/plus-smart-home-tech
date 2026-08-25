@@ -18,6 +18,9 @@ public class KafkaConfig {
     @Value("${kafka.bootstrap-servers}")
     private String bootstrapServers;
 
+    @Value("${kafka.consumer.enable-auto-commit}")
+    private boolean enableAutoCommit;
+
     @Bean
     public KafkaConsumer<String, SpecificRecordBase> snapshotConsumer(
             @Value("${kafka.consumer.snapshots.group-id}") String groupId,
@@ -28,7 +31,7 @@ public class KafkaConfig {
         props.put(ConsumerConfig.CLIENT_ID_CONFIG, clientId);
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, SensorsSnapshotDeserializer.class.getName());
-        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, enableAutoCommit);
         return new KafkaConsumer<>(props);
     }
 
@@ -42,7 +45,7 @@ public class KafkaConfig {
         props.put(ConsumerConfig.CLIENT_ID_CONFIG, clientId);
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, HubEventDeserializer.class.getName());
-        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, enableAutoCommit);
         return new KafkaConsumer<>(props);
     }
 }

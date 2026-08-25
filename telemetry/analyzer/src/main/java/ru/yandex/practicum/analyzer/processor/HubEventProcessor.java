@@ -6,8 +6,12 @@ import org.apache.avro.specific.SpecificRecordBase;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.errors.WakeupException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 import ru.yandex.practicum.analyzer.model.*;
 import ru.yandex.practicum.analyzer.repository.ActionRepository;
 import ru.yandex.practicum.analyzer.repository.ConditionRepository;
@@ -17,6 +21,7 @@ import ru.yandex.practicum.kafka.telemetry.event.*;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Optional;
 
 @Slf4j
 @Component
@@ -28,6 +33,7 @@ public class HubEventProcessor implements Runnable {
     private final ScenarioRepository scenarioRepository;
     private final ConditionRepository conditionRepository;
     private final ActionRepository actionRepository;
+    private final PlatformTransactionManager transactionManager;
 
     @Value("${kafka.consumer.hub-events.topic}")
     private String hubEventsTopic;
@@ -40,17 +46,43 @@ public class HubEventProcessor implements Runnable {
 
             while (true) {
                 ConsumerRecords<String, SpecificRecordBase> records = hubEventConsumer.poll(Duration.ofMillis(1000));
-                for (ConsumerRecord<String, SpecificRecordBase> record : records) {
-                    HubEventAvro event = (HubEventAvro) record.value();
-                    processHubEvent(event);
+
+                if (records.isEmpty()) {
+                    continue;
                 }
-                hubEventConsumer.commitSync();
+
+                boolean allProcessed = true;
+
+                for (ConsumerRecord<String, SpecificRecordBase> record : records) {
+                    try {
+                        HubEventAvro event = (HubEventAvro) record.value();
+                        processHubEvent(event);
+                    } catch (Exception e) {
+                        log.error("Failed to process hub event from partition {}, offset {}",
+                                record.partition(), record.offset(), e);
+                        allProcessed = false;
+                        break;
+                    }
+                }
+
+                if (allProcessed) {
+                    hubEventConsumer.commitSync();
+                } else {
+                    log.warn("Skipping offset commit due to processing errors");
+                }
             }
+        } catch (WakeupException e) {
+            log.info("Wakeup exception received in HubEventProcessor, shutting down...");
         } catch (Exception e) {
             log.error("Error in HubEventProcessor", e);
         } finally {
             hubEventConsumer.close();
+            log.info("HubEventProcessor consumer closed");
         }
+    }
+
+    public void shutdown() {
+        hubEventConsumer.wakeup();
     }
 
     private void processHubEvent(HubEventAvro event) {
@@ -66,7 +98,7 @@ public class HubEventProcessor implements Runnable {
             sensorRepository.deleteById(deviceRemoved.getId());
             log.info("Sensor removed: {}", deviceRemoved.getId());
         } else if (payload instanceof ScenarioAddedEventAvro scenarioAdded) {
-            saveScenario(event.getHubId(), scenarioAdded);
+            saveScenarioInTransaction(event.getHubId(), scenarioAdded);
             log.info("Scenario added: {}", scenarioAdded.getName());
         } else if (payload instanceof ScenarioRemovedEventAvro scenarioRemoved) {
             scenarioRepository.findByHubIdAndName(event.getHubId(), scenarioRemoved.getName())
@@ -75,13 +107,41 @@ public class HubEventProcessor implements Runnable {
         }
     }
 
-    private void saveScenario(String hubId, ScenarioAddedEventAvro scenarioAdded) {
-        Scenario scenario = Scenario.builder()
-                .hubId(hubId)
-                .name(scenarioAdded.getName())
-                .build();
-        scenario = scenarioRepository.save(scenario);
+    private void saveScenarioInTransaction(String hubId, ScenarioAddedEventAvro scenarioAdded) {
+        TransactionTemplate transactionTemplate = new TransactionTemplate(transactionManager);
+        transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
 
+        transactionTemplate.execute(status -> {
+            saveScenario(hubId, scenarioAdded);
+            return null;
+        });
+    }
+
+    private void saveScenario(String hubId, ScenarioAddedEventAvro scenarioAdded) {
+        // Ищем существующий сценарий
+        Optional<Scenario> existingScenario = scenarioRepository.findByHubIdAndName(hubId, scenarioAdded.getName());
+
+        Scenario scenario;
+        if (existingScenario.isPresent()) {
+            // Обновляем существующий сценарий
+            scenario = existingScenario.get();
+            log.info("Updating existing scenario: hubId={}, name={}", hubId, scenarioAdded.getName());
+
+            // Очищаем коллекции
+            scenario.getConditions().clear();
+            scenario.getActions().clear();
+            scenarioRepository.save(scenario);
+        } else {
+            // Создаём новый сценарий
+            scenario = Scenario.builder()
+                    .hubId(hubId)
+                    .name(scenarioAdded.getName())
+                    .build();
+            scenario = scenarioRepository.save(scenario);
+            log.info("Creating new scenario: hubId={}, name={}", hubId, scenarioAdded.getName());
+        }
+
+        // Добавляем условия
         for (ScenarioConditionAvro conditionAvro : scenarioAdded.getConditions()) {
             Condition condition = Condition.builder()
                     .type(conditionAvro.getType().name())
@@ -103,6 +163,7 @@ public class HubEventProcessor implements Runnable {
             scenario.getConditions().add(scenarioCondition);
         }
 
+        // Добавляем действия
         for (DeviceActionAvro actionAvro : scenarioAdded.getActions()) {
             Action action = Action.builder()
                     .type(actionAvro.getType().name())
@@ -123,8 +184,12 @@ public class HubEventProcessor implements Runnable {
             scenario.getActions().add(scenarioAction);
         }
 
-        // Сохраните сценарий после добавления всех условий и действий
-        scenarioRepository.save(scenario);
+        // Сохраняем сценарий
+        scenario = scenarioRepository.save(scenario);
+        log.info("Scenario saved: hubId={}, name={}, conditions={}, actions={}",
+                hubId, scenarioAdded.getName(),
+                scenario.getConditions().size(),
+                scenario.getActions().size());
     }
 
     private Integer convertValue(Object value) {
