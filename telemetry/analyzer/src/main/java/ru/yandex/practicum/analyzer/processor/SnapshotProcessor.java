@@ -8,6 +8,7 @@ import org.apache.avro.specific.SpecificRecordBase;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.WakeupException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -51,6 +52,7 @@ public class SnapshotProcessor {
                 }
 
                 boolean allProcessed = true;
+                ConsumerRecord<String, SpecificRecordBase> failedRecord = null;
 
                 for (ConsumerRecord<String, SpecificRecordBase> record : records) {
                     try {
@@ -60,6 +62,7 @@ public class SnapshotProcessor {
                         log.error("Failed to process snapshot from partition {}, offset {}",
                                 record.partition(), record.offset(), e);
                         allProcessed = false;
+                        failedRecord = record;
                         break;
                     }
                 }
@@ -67,7 +70,13 @@ public class SnapshotProcessor {
                 if (allProcessed) {
                     snapshotConsumer.commitSync();
                 } else {
-                    log.warn("Skipping offset commit due to processing errors");
+                    if (failedRecord != null) {
+                        TopicPartition partition = new TopicPartition(
+                                failedRecord.topic(), failedRecord.partition());
+                        snapshotConsumer.seek(partition, failedRecord.offset());
+                        log.warn("Seek to offset {} for partition {} due to processing errors",
+                                failedRecord.offset(), failedRecord.partition());
+                    }
                 }
             }
         } catch (WakeupException e) {
@@ -86,7 +95,6 @@ public class SnapshotProcessor {
     private void processSnapshot(SensorsSnapshotAvro snapshot) {
         log.info("Processing snapshot for hub: {}", snapshot.getHubId());
 
-        // Ждем 500мс перед обработкой, чтобы HubEventProcessor успел сохранить все сценарии
         try {
             Thread.sleep(500);
         } catch (InterruptedException e) {

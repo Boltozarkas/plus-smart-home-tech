@@ -9,6 +9,7 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.WakeupException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -50,6 +51,7 @@ public class AggregationStarter {
                 }
 
                 boolean allProcessed = true;
+                ConsumerRecord<String, SpecificRecordBase> failedRecord = null;
 
                 for (ConsumerRecord<String, SpecificRecordBase> record : records) {
                     try {
@@ -73,6 +75,7 @@ public class AggregationStarter {
                         log.error("Failed to process record from partition {}, offset {}",
                                 record.partition(), record.offset(), e);
                         allProcessed = false;
+                        failedRecord = record;
                         break; // Прерываем обработку batch'а
                     }
                 }
@@ -82,8 +85,14 @@ public class AggregationStarter {
                     consumer.commitSync();
                     log.info("Offsets committed successfully");
                 } else {
-                    // Не коммитим offset, чтобы записи можно было обработать повторно
-                    log.warn("Skipping offset commit due to processing errors");
+                    // Возвращаем position к необработанной записи
+                    if (failedRecord != null) {
+                        TopicPartition partition = new TopicPartition(
+                                failedRecord.topic(), failedRecord.partition());
+                        consumer.seek(partition, failedRecord.offset());
+                        log.warn("Seek to offset {} for partition {} due to processing errors",
+                                failedRecord.offset(), failedRecord.partition());
+                    }
                 }
             }
 

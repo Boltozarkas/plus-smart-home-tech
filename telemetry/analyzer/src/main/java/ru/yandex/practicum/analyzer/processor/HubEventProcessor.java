@@ -6,6 +6,7 @@ import org.apache.avro.specific.SpecificRecordBase;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.WakeupException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -52,6 +53,7 @@ public class HubEventProcessor implements Runnable {
                 }
 
                 boolean allProcessed = true;
+                ConsumerRecord<String, SpecificRecordBase> failedRecord = null;
 
                 for (ConsumerRecord<String, SpecificRecordBase> record : records) {
                     try {
@@ -61,6 +63,7 @@ public class HubEventProcessor implements Runnable {
                         log.error("Failed to process hub event from partition {}, offset {}",
                                 record.partition(), record.offset(), e);
                         allProcessed = false;
+                        failedRecord = record;
                         break;
                     }
                 }
@@ -68,7 +71,13 @@ public class HubEventProcessor implements Runnable {
                 if (allProcessed) {
                     hubEventConsumer.commitSync();
                 } else {
-                    log.warn("Skipping offset commit due to processing errors");
+                    if (failedRecord != null) {
+                        TopicPartition partition = new TopicPartition(
+                                failedRecord.topic(), failedRecord.partition());
+                        hubEventConsumer.seek(partition, failedRecord.offset());
+                        log.warn("Seek to offset {} for partition {} due to processing errors",
+                                failedRecord.offset(), failedRecord.partition());
+                    }
                 }
             }
         } catch (WakeupException e) {
@@ -118,21 +127,16 @@ public class HubEventProcessor implements Runnable {
     }
 
     private void saveScenario(String hubId, ScenarioAddedEventAvro scenarioAdded) {
-        // Ищем существующий сценарий
         Optional<Scenario> existingScenario = scenarioRepository.findByHubIdAndName(hubId, scenarioAdded.getName());
 
         Scenario scenario;
         if (existingScenario.isPresent()) {
-            // Обновляем существующий сценарий
             scenario = existingScenario.get();
             log.info("Updating existing scenario: hubId={}, name={}", hubId, scenarioAdded.getName());
-
-            // Очищаем коллекции
             scenario.getConditions().clear();
             scenario.getActions().clear();
             scenarioRepository.save(scenario);
         } else {
-            // Создаём новый сценарий
             scenario = Scenario.builder()
                     .hubId(hubId)
                     .name(scenarioAdded.getName())
@@ -141,7 +145,6 @@ public class HubEventProcessor implements Runnable {
             log.info("Creating new scenario: hubId={}, name={}", hubId, scenarioAdded.getName());
         }
 
-        // Добавляем условия
         for (ScenarioConditionAvro conditionAvro : scenarioAdded.getConditions()) {
             Condition condition = Condition.builder()
                     .type(conditionAvro.getType().name())
@@ -163,7 +166,6 @@ public class HubEventProcessor implements Runnable {
             scenario.getConditions().add(scenarioCondition);
         }
 
-        // Добавляем действия
         for (DeviceActionAvro actionAvro : scenarioAdded.getActions()) {
             Action action = Action.builder()
                     .type(actionAvro.getType().name())
@@ -184,7 +186,6 @@ public class HubEventProcessor implements Runnable {
             scenario.getActions().add(scenarioAction);
         }
 
-        // Сохраняем сценарий
         scenario = scenarioRepository.save(scenario);
         log.info("Scenario saved: hubId={}, name={}, conditions={}, actions={}",
                 hubId, scenarioAdded.getName(),
