@@ -1,6 +1,6 @@
 spring:
   application:
-    name: collector
+    name: product-service
   config:
     import: configserver:http://localhost:8888
   cloud:

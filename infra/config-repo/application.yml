@@ -1,0 +1,19 @@
+spring:
+  main:
+    banner-mode: off
+    log-startup-info: false
+
+logging:
+  level:
+    ru.yandex.practicum.telemetry: WARN
+    org:
+      springframework: ERROR
+      apache.kafka: WARN
+
+kafka:
+  bootstrap-servers: "localhost:9092"
+
+eureka:
+  client:
+    serviceUrl:
+      defaultZone: http://localhost:8761/eureka/
