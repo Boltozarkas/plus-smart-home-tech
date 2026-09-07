@@ -9,6 +9,7 @@ import ru.yandex.practicum.inventory.dto.ReserveRequest;
 import ru.yandex.practicum.inventory.dto.ReserveResponse;
 import ru.yandex.practicum.inventory.dto.UpdateInventoryRequest;
 import ru.yandex.practicum.inventory.entity.InventoryItem;
+import ru.yandex.practicum.inventory.exception.ConflictException;
 import ru.yandex.practicum.inventory.exception.InsufficientStockException;
 import ru.yandex.practicum.inventory.exception.NotFoundException;
 import ru.yandex.practicum.inventory.repository.InventoryRepository;
@@ -39,7 +40,7 @@ public class InventoryService {
     @Transactional
     public InventoryDto createInventory(UpdateInventoryRequest request) {
         if (inventoryRepository.existsByProductId(request.productId())) {
-            throw new IllegalArgumentException(
+            throw new ConflictException(
                     "Складская запись для товара с id " + request.productId() + " уже существует");
         }
 
@@ -56,6 +57,15 @@ public class InventoryService {
     @Transactional
     public InventoryDto updateInventory(UpdateInventoryRequest request) {
         InventoryItem item = findByProductId(request.productId());
+
+        if (request.quantity() < item.getReservedQuantity()) {
+            throw new InsufficientStockException(
+                    String.format("Невозможно установить количество %d для товара с id %d. " +
+                                    "Зарезервировано: %d. Освободите резерв перед уменьшением.",
+                            request.quantity(), request.productId(), item.getReservedQuantity())
+            );
+        }
+
         item.setQuantity(request.quantity());
 
         InventoryItem updated = inventoryRepository.save(item);

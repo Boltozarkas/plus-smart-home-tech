@@ -3,11 +3,13 @@ package ru.yandex.practicum.inventory.exception;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -31,23 +33,19 @@ public class GlobalExceptionHandler {
         return new ErrorResponse(HttpStatus.CONFLICT.value(), e.getMessage());
     }
 
-    /**
-     * Конфликт оптимистичной блокировки: два запроса одновременно изменили одну запись.
-     * Клиент должен повторить запрос.
-     */
+    @ExceptionHandler(ConflictException.class)
+    @ResponseStatus(HttpStatus.CONFLICT)
+    public ErrorResponse handleConflict(ConflictException e) {
+        log.warn("Конфликт состояния ресурса: {}", e.getMessage());
+        return new ErrorResponse(HttpStatus.CONFLICT.value(), e.getMessage());
+    }
+
     @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
     @ResponseStatus(HttpStatus.CONFLICT)
     public ErrorResponse handleOptimisticLock(ObjectOptimisticLockingFailureException e) {
         log.warn("Конфликт конкурентного доступа: {}", e.getMessage());
         return new ErrorResponse(HttpStatus.CONFLICT.value(),
                 "Конфликт конкурентного доступа. Данные были изменены другим запросом. Повторите операцию.");
-    }
-
-    @ExceptionHandler(IllegalArgumentException.class)
-    @ResponseStatus(HttpStatus.BAD_REQUEST)
-    public ErrorResponse handleIllegalArgument(IllegalArgumentException e) {
-        log.warn("Некорректный запрос: {}", e.getMessage());
-        return new ErrorResponse(HttpStatus.BAD_REQUEST.value(), e.getMessage());
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
@@ -58,6 +56,24 @@ public class GlobalExceptionHandler {
                 .forEach(error -> errors.put(error.getField(), error.getDefaultMessage()));
         log.warn("Ошибка валидации: {}", errors);
         return new ErrorResponse(HttpStatus.BAD_REQUEST.value(), "Ошибка валидации", errors);
+    }
+
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public ErrorResponse handleTypeMismatch(MethodArgumentTypeMismatchException e) {
+        log.warn("Неверный тип параметра: {}", e.getMessage());
+        String message = String.format("Неверный формат параметра '%s'. Ожидался тип: %s",
+                e.getName(),
+                e.getRequiredType() != null ? e.getRequiredType().getSimpleName() : "unknown");
+        return new ErrorResponse(HttpStatus.BAD_REQUEST.value(), message);
+    }
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public ErrorResponse handleMessageNotReadable(HttpMessageNotReadableException e) {
+        log.warn("Некорректное тело запроса: {}", e.getMessage());
+        return new ErrorResponse(HttpStatus.BAD_REQUEST.value(),
+                "Некорректный формат тела запроса. Проверьте JSON.");
     }
 
     @ExceptionHandler(Exception.class)
