@@ -17,9 +17,32 @@ spring:
         format_sql: true
     show-sql: false
 
+  cloud:
+    openfeign:
+      client:
+        config:
+          default:
+            connectTimeout: 5000
+            readTimeout: 5000
+            loggerLevel: BASIC
+          inventory-service:
+            connectTimeout: 3000
+            readTimeout: 3000
+            loggerLevel: BASIC
+          product-service:
+            connectTimeout: 5000
+            readTimeout: 5000
+            loggerLevel: BASIC
+
 eureka:
   client:
     service-url:
       defaultZone: http://localhost:8761/eureka/
   instance:
     prefer-ip-address: true
+
+logging:
+  level:
+    ru.yandex.practicum.order.client.ProductClient: DEBUG
+    ru.yandex.practicum.order.client.InventoryClient: DEBUG
+    ru.yandex.practicum.order.config.FeignRequestInterceptor: DEBUG
