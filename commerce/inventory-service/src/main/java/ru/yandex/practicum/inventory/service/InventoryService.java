@@ -11,6 +11,7 @@ import ru.yandex.practicum.inventory.dto.UpdateInventoryRequest;
 import ru.yandex.practicum.inventory.entity.InventoryItem;
 import ru.yandex.practicum.inventory.exception.ConflictException;
 import ru.yandex.practicum.inventory.exception.InsufficientStockException;
+import ru.yandex.practicum.inventory.exception.InvalidReserveReleaseException;
 import ru.yandex.practicum.inventory.exception.NotFoundException;
 import ru.yandex.practicum.inventory.repository.InventoryRepository;
 
@@ -94,6 +95,30 @@ public class InventoryService {
                 true,
                 updated.getAvailableQuantity(),
                 "Товар успешно зарезервирован"
+        );
+    }
+
+    @Transactional
+    public ReserveResponse releaseInventory(ReserveRequest request) {
+        InventoryItem item = findByProductId(request.productId());
+
+        if (item.getReservedQuantity() < request.quantity()) {
+            throw new InvalidReserveReleaseException(
+                    String.format("Невозможно снять резерв %d для товара с id %d. " +
+                                    "Зарезервировано: %d",
+                            request.quantity(), request.productId(), item.getReservedQuantity())
+            );
+        }
+
+        item.setReservedQuantity(item.getReservedQuantity() - request.quantity());
+
+        InventoryItem updated = inventoryRepository.save(item);
+        log.info("Снят резерв {} единиц товара {}", request.quantity(), request.productId());
+
+        return new ReserveResponse(
+                true,
+                updated.getAvailableQuantity(),
+                "Резерв успешно снят"
         );
     }
 
