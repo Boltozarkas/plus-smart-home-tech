@@ -13,7 +13,9 @@ import ru.yandex.practicum.order.client.InventoryClient;
 import ru.yandex.practicum.order.client.ProductClient;
 import ru.yandex.practicum.order.dto.*;
 import ru.yandex.practicum.order.entity.Order;
+import ru.yandex.practicum.order.exception.InventoryServiceUnavailableException;
 import ru.yandex.practicum.order.exception.OrderProcessingException;
+import ru.yandex.practicum.order.exception.ProductServiceUnavailableException;
 import ru.yandex.practicum.order.repository.OrderRepository;
 
 import java.math.BigDecimal;
@@ -274,5 +276,67 @@ class OrderServiceTest {
         verify(inventoryClient, times(1)).reserve(any(InventoryRequest.class));
         verify(inventoryClient, times(1)).release(any(InventoryRequest.class));
         verify(orderRepository, never()).save(any(Order.class));
+    }
+
+    @Test
+    @DisplayName("Техническая недоступность product-service - заказ в PENDING_CONFIRMATION")
+    void createOrder_ProductServiceDegraded() {
+        // Given
+        CreateOrderRequest request = new CreateOrderRequest(
+                "Иван Петров",
+                "ivan@example.com",
+                List.of(new OrderItemRequest(1L, 2))
+        );
+
+        when(productClient.getProductById(1L))
+                .thenThrow(new ProductServiceUnavailableException(1L, new RuntimeException("Timeout")));
+        when(orderRepository.save(any(Order.class))).thenAnswer(invocation -> {
+            Order order = invocation.getArgument(0);
+            order.setId(1L);
+            return order;
+        });
+
+        // When
+        OrderDto result = orderService.createOrder(request);
+
+        // Then
+        assertNotNull(result);
+        assertEquals("PENDING_CONFIRMATION", result.status());
+        assertEquals("Товар #1 (ожидает проверки)", result.items().get(0).productName());
+        assertEquals(BigDecimal.ZERO, result.items().get(0).price());
+
+        verify(inventoryClient, never()).reserve(any(InventoryRequest.class));
+        verify(orderRepository, times(1)).save(any(Order.class));
+    }
+
+    @Test
+    @DisplayName("Техническая недоступность inventory-service - заказ в PENDING_CONFIRMATION")
+    void createOrder_InventoryServiceDegraded() {
+        // Given
+        CreateOrderRequest request = new CreateOrderRequest(
+                "Иван Петров",
+                "ivan@example.com",
+                List.of(new OrderItemRequest(1L, 2))
+        );
+
+        when(productClient.getProductById(1L)).thenReturn(activeProduct);
+        when(inventoryClient.reserve(any(InventoryRequest.class)))
+                .thenThrow(new InventoryServiceUnavailableException(1L, "reserve", new RuntimeException("Timeout")));
+        when(orderRepository.save(any(Order.class))).thenAnswer(invocation -> {
+            Order order = invocation.getArgument(0);
+            order.setId(1L);
+            return order;
+        });
+
+        // When
+        OrderDto result = orderService.createOrder(request);
+
+        // Then
+        assertNotNull(result);
+        assertEquals("PENDING_CONFIRMATION", result.status());
+        assertEquals("SHT LED Smart Bulb W3", result.items().get(0).productName());
+        assertEquals(new BigDecimal("1490.00"), result.items().get(0).price());
+
+        verify(orderRepository, times(1)).save(any(Order.class));
     }
 }

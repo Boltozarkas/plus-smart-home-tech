@@ -19,6 +19,8 @@ spring:
 
   cloud:
     openfeign:
+      circuitbreaker:
+        enabled: true
       client:
         config:
           default:
@@ -34,6 +36,19 @@ spring:
             readTimeout: 5000
             loggerLevel: BASIC
 
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        sliding-window-size: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+  timelimiter:
+    configs:
+      default:
+        timeout-duration: 3s
+
 eureka:
   client:
     service-url:
@@ -45,4 +60,5 @@ logging:
   level:
     ru.yandex.practicum.order.client.ProductClient: DEBUG
     ru.yandex.practicum.order.client.InventoryClient: DEBUG
-    ru.yandex.practicum.order.config.FeignRequestInterceptor: DEBUG
+    ru.yandex.practicum.order.client.ProductClientFallbackFactory: DEBUG
+    ru.yandex.practicum.order.client.InventoryClientFallbackFactory: DEBUG
