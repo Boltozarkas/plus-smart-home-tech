@@ -1,5 +1,6 @@
 package ru.yandex.practicum.gateway.security;
 
+import org.springframework.cloud.gateway.config.GlobalCorsProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
@@ -11,23 +12,27 @@ import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.server.SecurityWebFilterChain;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.reactive.CorsConfigurationSource;
+import org.springframework.web.cors.reactive.UrlBasedCorsConfigurationSource;
 
 import java.util.List;
+import java.util.Map;
 
 @Configuration
 @EnableWebFluxSecurity
 public class GatewaySecurityConfig {
 
     @Bean
-    public SecurityWebFilterChain securityWebFilterChain(ServerHttpSecurity http) {
+    public SecurityWebFilterChain securityWebFilterChain(
+            ServerHttpSecurity http,
+            CorsConfigurationSource corsConfigurationSource) {
         return http
                 .csrf(ServerHttpSecurity.CsrfSpec::disable)
-                .cors(cors -> {})  // используем CORS из gateway конфига
+                .cors(cors -> cors.configurationSource(corsConfigurationSource))
                 .authorizeExchange(exchanges -> exchanges
-                        // Preflight OPTIONS - публичный
                         .pathMatchers(HttpMethod.OPTIONS, "/**").permitAll()
 
-                        // Swagger / OpenAPI
                         .pathMatchers(
                                 "/v3/api-docs/**",
                                 "/swagger-ui/**",
@@ -36,20 +41,16 @@ public class GatewaySecurityConfig {
                                 "/swagger-resources/**"
                         ).permitAll()
 
-                        // Публичные GET-маршруты
                         .pathMatchers(HttpMethod.GET, "/api/products/**").permitAll()
                         .pathMatchers(HttpMethod.GET, "/api/categories/**").permitAll()
                         .pathMatchers(HttpMethod.GET, "/api/inventory/**").permitAll()
 
-                        // Пользовательские маршруты (USER или ADMIN)
                         .pathMatchers(HttpMethod.POST, "/api/orders/**").hasAnyRole("USER", "ADMIN")
                         .pathMatchers(HttpMethod.GET, "/api/orders/by-email").hasAnyRole("USER", "ADMIN")
                         .pathMatchers(HttpMethod.GET, "/api/orders/{id}").hasAnyRole("USER", "ADMIN")
 
-                        // Административные маршруты
                         .pathMatchers(HttpMethod.GET, "/api/orders").hasRole("ADMIN")
 
-                        // Изменяющие маршруты каталога и склада
                         .pathMatchers(HttpMethod.POST, "/api/products/**").hasRole("ADMIN")
                         .pathMatchers(HttpMethod.PATCH, "/api/products/**").hasRole("ADMIN")
                         .pathMatchers(HttpMethod.PUT, "/api/products/**").hasRole("ADMIN")
@@ -65,12 +66,25 @@ public class GatewaySecurityConfig {
                         .pathMatchers(HttpMethod.PATCH, "/api/inventory/**").hasRole("ADMIN")
                         .pathMatchers(HttpMethod.DELETE, "/api/inventory/**").hasRole("ADMIN")
 
-                        // Всё остальное — запрещено
                         .anyExchange().denyAll()
                 )
                 .httpBasic(httpBasic -> {})
                 .formLogin(ServerHttpSecurity.FormLoginSpec::disable)
                 .build();
+    }
+
+    @Bean
+    public CorsConfigurationSource corsConfigurationSource(GlobalCorsProperties globalCorsProperties) {
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+
+        Map<String, CorsConfiguration> corsConfigurations =
+                globalCorsProperties.getCorsConfigurations();
+
+        if (corsConfigurations != null && !corsConfigurations.isEmpty()) {
+            corsConfigurations.forEach(source::registerCorsConfiguration);
+        }
+
+        return source;
     }
 
     @Bean

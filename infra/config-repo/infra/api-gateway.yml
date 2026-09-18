@@ -87,6 +87,7 @@ spring:
           predicates:
             - Path=/api/orders/**
 
+      # CORS-конфигурация — используется и Gateway, и Security через GlobalCorsProperties
       globalcors:
         add-to-simple-url-handler-mapping: true
         cors-configurations:
@@ -115,3 +116,16 @@ eureka:
       defaultZone: http://localhost:8761/eureka/
   instance:
     prefer-ip-address: true
+
+app:
+  security:
+    users:
+      - username: ivan
+        password: ivan
+        roles:
+          - USER
+      - username: anna
+        password: anna
+        roles:
+          - USER
+          - ADMIN
