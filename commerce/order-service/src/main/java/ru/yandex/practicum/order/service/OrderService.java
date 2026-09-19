@@ -1,16 +1,20 @@
 package ru.yandex.practicum.order.service;
 
+import feign.FeignException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import ru.yandex.practicum.order.client.InventoryClient;
+import ru.yandex.practicum.order.client.ProductClient;
 import ru.yandex.practicum.order.dto.*;
 import ru.yandex.practicum.order.entity.Order;
 import ru.yandex.practicum.order.entity.OrderItem;
-import ru.yandex.practicum.order.exception.NotFoundException;
+import ru.yandex.practicum.order.exception.*;
 import ru.yandex.practicum.order.repository.OrderRepository;
 
-import java.util.List;
+import java.math.BigDecimal;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @Service
@@ -19,31 +23,210 @@ import java.util.stream.Collectors;
 public class OrderService {
 
     private final OrderRepository orderRepository;
+    private final ProductClient productClient;
+    private final InventoryClient inventoryClient;
 
-    @Transactional
     public OrderDto createOrder(CreateOrderRequest request) {
-        Order order = new Order();
-        order.setCustomerName(request.customerName());
-        order.setCustomerEmail(request.customerEmail());
-        order.setStatus("CREATED");
-        order.setStatusDetails("Заказ создан");
+        log.info("Начало создания заказа для {}", request.customerEmail());
 
-        // Создаем позиции заказа (снимок товарных данных)
-        for (OrderItemRequest itemRequest : request.items()) {
-            OrderItem item = new OrderItem();
-            item.setProductId(itemRequest.productId());
-            item.setProductName(itemRequest.productName());
-            item.setQuantity(itemRequest.quantity());
-            item.setPrice(itemRequest.price());
-            order.addItem(item);
+        Map<Long, Integer> groupedItems = request.items().stream()
+                .collect(Collectors.groupingBy(
+                        OrderItemRequest::productId,
+                        Collectors.summingInt(OrderItemRequest::quantity)
+                ));
+
+        log.info("Сгруппированные позиции: {}", groupedItems);
+
+        List<InventoryRequest> successfulReserves = new ArrayList<>();
+        boolean degraded = false;
+        StringBuilder degradedReasons = new StringBuilder();
+        List<OrderItemData> itemDataList = new ArrayList<>();
+
+        try {
+            for (Map.Entry<Long, Integer> entry : groupedItems.entrySet()) {
+                Long productId = entry.getKey();
+                Integer quantity = entry.getValue();
+
+                try {
+                    ServiceCallResult<ProductDto> productResult = getProduct(productId);
+
+                    if (productResult.isDegraded()) {
+                        degraded = true;
+                        degradedReasons.append("Product service unavailable for product ")
+                                .append(productId).append("; ");
+
+                        itemDataList.add(new OrderItemData(
+                                productId,
+                                "Товар #" + productId + " (ожидает проверки)",
+                                quantity,
+                                BigDecimal.ZERO
+                        ));
+                        continue;
+                    }
+
+                    ProductDto product = productResult.data();
+
+                    if (!product.active()) {
+                        throw new OrderProcessingException(
+                                "Товар с id " + productId + " снят с продажи");
+                    }
+
+                    ServiceCallResult<InventoryResponse> reserveResult = reserveInventory(
+                            new InventoryRequest(productId, quantity)
+                    );
+
+                    if (reserveResult.isDegraded()) {
+                        degraded = true;
+                        degradedReasons.append("Inventory service unavailable for product ")
+                                .append(productId).append("; ");
+
+                        itemDataList.add(new OrderItemData(
+                                productId,
+                                product.name(),
+                                quantity,
+                                product.price()
+                        ));
+                        continue;
+                    }
+
+                    successfulReserves.add(new InventoryRequest(productId, quantity));
+                    itemDataList.add(new OrderItemData(
+                            productId,
+                            product.name(),
+                            quantity,
+                            product.price()
+                    ));
+
+                    log.info("Зарезервировано {} единиц товара {}", quantity, productId);
+
+                } catch (ProductServiceUnavailableException e) {
+                    degraded = true;
+                    degradedReasons.append("Product service unavailable for product ")
+                            .append(productId).append("; ");
+
+                    itemDataList.add(new OrderItemData(
+                            productId,
+                            "Товар #" + productId + " (ожидает проверки)",
+                            quantity,
+                            BigDecimal.ZERO
+                    ));
+                } catch (InventoryServiceUnavailableException e) {
+                    degraded = true;
+                    degradedReasons.append("Inventory service unavailable for product ")
+                            .append(productId).append("; ");
+
+                    String productName = "Товар #" + productId + " (ожидает проверки)";
+                    BigDecimal price = BigDecimal.ZERO;
+                    try {
+                        ProductDto product = productClient.getProductById(productId);
+                        productName = product.name();
+                        price = product.price();
+                    } catch (Exception ex) {
+                        log.warn("Не удалось получить данные товара {} при деградации склада: {}",
+                                productId, ex.getMessage());
+                    }
+
+                    itemDataList.add(new OrderItemData(
+                            productId,
+                            productName,
+                            quantity,
+                            price
+                    ));
+                } catch (OrderProcessingException e) {
+                    // Бизнес-ошибка - компенсируем резервы и выбрасываем
+                    releaseReserves(successfulReserves);
+                    throw e;
+                }
+            }
+
+            // Создаем заказ
+            Order order = new Order();
+            order.setCustomerName(request.customerName());
+            order.setCustomerEmail(request.customerEmail());
+
+            if (degraded) {
+                order.setStatus("PENDING_CONFIRMATION");
+                order.setStatusDetails("Заказ требует ручной проверки. Причины: " + degradedReasons);
+            } else {
+                order.setStatus("CONFIRMED");
+                order.setStatusDetails("Заказ подтвержден");
+            }
+
+            for (OrderItemData itemData : itemDataList) {
+                OrderItem item = new OrderItem();
+                item.setProductId(itemData.productId());
+                item.setProductName(itemData.productName());
+                item.setQuantity(itemData.quantity());
+                item.setPrice(itemData.price());
+                order.addItem(item);
+            }
+
+            order.calculateTotalPrice();
+
+            // ← Сохранение в try-catch для компенсации при ошибке
+            Order saved;
+            try {
+                saved = orderRepository.save(order);
+            } catch (Exception e) {
+                releaseReserves(successfulReserves);
+                log.error("Ошибка сохранения заказа", e);
+                throw new OrderProcessingException("Ошибка сохранения заказа: " + e.getMessage());
+            }
+
+            log.info("Заказ создан с id={}, статус={}", saved.getId(), saved.getStatus());
+            return toDto(saved);
+
+        } catch (OrderProcessingException e) {
+            // Уже обработано выше, резервы сняты
+            throw e;
+        } catch (Exception e) {
+            releaseReserves(successfulReserves);
+            log.error("Непредвиденная ошибка при создании заказа", e);
+            throw new OrderProcessingException("Ошибка обработки заказа: " + e.getMessage());
         }
+    }
 
-        // Рассчитываем общую стоимость
-        order.calculateTotalPrice();
+    private ServiceCallResult<ProductDto> getProduct(Long productId) {
+        try {
+            ProductDto product = productClient.getProductById(productId);
+            return ServiceCallResult.success(product);
+        } catch (ProductServiceUnavailableException e) {
+            return ServiceCallResult.degraded(e.getMessage());
+        } catch (FeignException.NotFound e) {
+            throw new OrderProcessingException("Товар с id " + productId + " не найден");
+        } catch (FeignException e) {
+            throw new OrderProcessingException("Ошибка при получении товара с id " + productId);
+        }
+    }
 
-        Order saved = orderRepository.save(order);
-        log.info("Создан заказ id={} для клиента {}", saved.getId(), saved.getCustomerEmail());
-        return toDto(saved);
+    private ServiceCallResult<InventoryResponse> reserveInventory(InventoryRequest request) {
+        try {
+            InventoryResponse response = inventoryClient.reserve(request);
+            return ServiceCallResult.success(response);
+        } catch (InventoryServiceUnavailableException e) {
+            return ServiceCallResult.degraded(e.getMessage());
+        } catch (FeignException.NotFound e) {
+            throw new OrderProcessingException(
+                    "Складская запись не найдена для товара с id " + request.productId());
+        } catch (FeignException.Conflict e) {
+            throw new OrderProcessingException(
+                    "Недостаточно товара с id " + request.productId());
+        } catch (FeignException e) {
+            throw new OrderProcessingException(
+                    "Ошибка при резервировании товара с id " + request.productId());
+        }
+    }
+
+    private void releaseReserves(List<InventoryRequest> reserves) {
+        for (InventoryRequest reserve : reserves) {
+            try {
+                inventoryClient.release(reserve);
+                log.info("Снят резерв для товара {} в количестве {}",
+                        reserve.productId(), reserve.quantity());
+            } catch (Exception e) {
+                log.error("Ошибка при снятии резерва для товара {}", reserve.productId(), e);
+            }
+        }
     }
 
     @Transactional(readOnly = true)
@@ -61,11 +244,7 @@ public class OrderService {
 
     @Transactional(readOnly = true)
     public List<OrderDto> getOrdersByEmail(String email) {
-        List<Order> orders = orderRepository.findByCustomerEmailIgnoreCase(email);
-        if (orders.isEmpty()) {
-            log.warn("Заказы для email {} не найдены", email);
-        }
-        return orders.stream()
+        return orderRepository.findByCustomerEmailIgnoreCase(email).stream()
                 .map(this::toDto)
                 .collect(Collectors.toList());
     }
@@ -100,5 +279,13 @@ public class OrderService {
                 item.getQuantity(),
                 item.getPrice()
         );
+    }
+
+    private record OrderItemData(
+            Long productId,
+            String productName,
+            Integer quantity,
+            BigDecimal price
+    ) {
     }
 }
